@@ -34,7 +34,10 @@ target_link_libraries(chat_core PUBLIC
   OpenSSL::Crypto
   nlohmann_json::nlohmann_json
 )
-add_executable(chat_server server/main.cpp)
+add_executable(chat_server
+  server/main.cpp
+  server/user_table.cpp
+)
 target_link_libraries(chat_server PRIVATE chat_core)
 add_executable(chat_client client/main.cpp)
 target_link_libraries(chat_client PRIVATE chat_core)
