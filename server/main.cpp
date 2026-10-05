@@ -1,5 +1,6 @@
 #include "common/net.hpp"
 #include "common/protocol.hpp"
+#include "server/client_connection.hpp"
 #include "server/user_table.hpp"
 
 #include <arpa/inet.h>
@@ -14,12 +15,14 @@
 #include <cstring>
 #include <exception>
 #include <iostream>
+#include <memory>
 #include <mutex>
 #include <nlohmann/json.hpp>
 #include <optional>
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <vector>
 
 namespace {
 
@@ -36,55 +39,6 @@ std::string errno_message(const char* operation) {
     return std::string(operation) + " failed: " +
            std::strerror(error_number);
 }
-
-class UniqueFd {
-public:
-    UniqueFd() = default;
-
-    explicit UniqueFd(int fd)
-        : fd_(fd) {}
-
-    ~UniqueFd() {
-        reset();
-    }
-
-    UniqueFd(const UniqueFd&) = delete;
-    UniqueFd& operator=(const UniqueFd&) = delete;
-
-    UniqueFd(UniqueFd&& other) noexcept
-        : fd_(other.release()) {}
-
-    UniqueFd& operator=(UniqueFd&& other) noexcept {
-        if (this != &other) {
-            reset(other.release());
-        }
-        return *this;
-    }
-
-    int get() const {
-        return fd_;
-    }
-
-    explicit operator bool() const {
-        return fd_ >= 0;
-    }
-
-    int release() {
-        const int old_fd = fd_;
-        fd_ = -1;
-        return old_fd;
-    }
-
-    void reset(int new_fd = -1) {
-        if (fd_ >= 0) {
-            ::close(fd_);
-        }
-        fd_ = new_fd;
-    }
-
-private:
-    int fd_ = -1;
-};
 
 class LoginGuard {
 public:
@@ -164,23 +118,32 @@ UniqueFd create_listener(std::uint16_t port) {
     return listener;
 }
 
-void send_json_frame(int socket_fd,
-                     chat::MessageType type,
-                     const nlohmann::json& payload) {
-    const chat::Frame frame{type, payload.dump()};
-    chat::send_frame(socket_fd, frame);
+void send_frame_to_client(
+    const std::shared_ptr<ClientConnection>& client,
+    const chat::Frame& frame) {
+    std::lock_guard<std::mutex> lock(client->send_mutex);
+    chat::send_frame(client->fd(), frame);
 }
 
-void send_error(int socket_fd,
-                const std::string& code,
-                const std::string& message) {
+void send_json_frame(
+    const std::shared_ptr<ClientConnection>& client,
+    chat::MessageType type,
+    const nlohmann::json& payload) {
+    const chat::Frame frame{type, payload.dump()};
+    send_frame_to_client(client, frame);
+}
+
+void send_error(
+    const std::shared_ptr<ClientConnection>& client,
+    const std::string& code,
+    const std::string& message) {
     try {
         const nlohmann::json payload = {
             {"code", code},
             {"message", message},
         };
 
-        send_json_frame(socket_fd,
+        send_json_frame(client,
                         chat::MessageType::kErrorMessage,
                         payload);
     } catch (const std::exception&) {
@@ -188,15 +151,16 @@ void send_error(int socket_fd,
     }
 }
 
-void send_login_response(int socket_fd,
-                         bool ok,
-                         const std::string& message) {
+void send_login_response(
+    const std::shared_ptr<ClientConnection>& client,
+    bool ok,
+    const std::string& message) {
     const nlohmann::json payload = {
         {"ok", ok},
         {"message", message},
     };
 
-    send_json_frame(socket_fd,
+    send_json_frame(client,
                     chat::MessageType::kLoginResponse,
                     payload);
 }
@@ -230,22 +194,23 @@ bool is_valid_username(const std::string& username) {
     return true;
 }
 
-bool handle_login(int socket_fd,
-                  const chat::Frame& frame,
-                  LoginGuard& login_guard) {
+bool handle_login(
+    const std::shared_ptr<ClientConnection>& client,
+    const chat::Frame& frame,
+    LoginGuard& login_guard) {
     nlohmann::json payload;
 
     try {
         payload = nlohmann::json::parse(frame.payload);
     } catch (const nlohmann::json::exception&) {
-        send_error(socket_fd, "BAD_REQUEST", "invalid JSON payload");
+        send_error(client, "BAD_REQUEST", "invalid JSON payload");
         return false;
     }
 
     if (!payload.is_object() ||
         !payload.contains("username") ||
         !payload["username"].is_string()) {
-        send_error(socket_fd,
+        send_error(client,
                    "BAD_REQUEST",
                    "missing or invalid username");
         return false;
@@ -255,12 +220,12 @@ bool handle_login(int socket_fd,
         trim(payload["username"].get<std::string>());
 
     if (!is_valid_username(username)) {
-        send_login_response(socket_fd, false, "invalid username");
+        send_login_response(client, false, "invalid username");
         return false;
     }
 
-    if (!g_users.add(username, socket_fd)) {
-        send_login_response(socket_fd,
+    if (!g_users.add(username, client)) {
+        send_login_response(client,
                             false,
                             "username already exists");
         return false;
@@ -269,29 +234,162 @@ bool handle_login(int socket_fd,
     // 先标记登录成功。即使之后发送响应失败，LoginGuard 也会清理用户表。
     login_guard.mark_logged_in();
 
-    send_login_response(socket_fd, true, "login success");
+    send_login_response(client, true, "login success");
     log_line("user logged in: " + username);
     return true;
 }
 
-void handle_list_users(int socket_fd) {
+void handle_list_users(
+    const std::shared_ptr<ClientConnection>& client) {
     const nlohmann::json payload = {
         {"users", g_users.usernames()},
     };
 
-    send_json_frame(socket_fd,
+    send_json_frame(client,
                     chat::MessageType::kUserListResponse,
                     payload);
 }
 
-void handle_client(UniqueFd client) {
-    LoginGuard login_guard(g_users, client.get());
+void remove_unreachable_client(
+    const std::shared_ptr<ClientConnection>& client,
+    const std::exception& error) {
+    const std::optional<std::string> removed =
+        g_users.remove_by_fd(client->fd());
+
+    if (removed.has_value()) {
+        log_line("removed unreachable user: " + removed.value() +
+                 ", reason: " + error.what());
+    }
+}
+
+void broadcast_chat(
+    const std::string& from,
+    const std::string& content) {
+    const nlohmann::json payload = {
+        {"from", from},
+        {"to", "*"},
+        {"content", content},
+    };
+
+    const chat::Frame frame{
+        chat::MessageType::kChatMessage,
+        payload.dump(),
+    };
+
+    const std::vector<std::shared_ptr<ClientConnection>> clients =
+        g_users.clients();
+
+    for (const auto& client : clients) {
+        try {
+            send_frame_to_client(client, frame);
+        } catch (const std::exception& error) {
+            remove_unreachable_client(client, error);
+        }
+    }
+}
+
+void send_private_chat(
+    const std::shared_ptr<ClientConnection>& sender,
+    const std::string& from,
+    const std::string& to,
+    const std::string& content) {
+    const std::shared_ptr<ClientConnection> target =
+        g_users.find_client(to);
+
+    if (!target) {
+        send_error(sender,
+                   "USER_NOT_FOUND",
+                   "target user is not online");
+        return;
+    }
+
+    const nlohmann::json payload = {
+        {"from", from},
+        {"to", to},
+        {"content", content},
+    };
+
+    const chat::Frame frame{
+        chat::MessageType::kChatMessage,
+        payload.dump(),
+    };
+
+    try {
+        send_frame_to_client(target, frame);
+    } catch (const std::exception& error) {
+        remove_unreachable_client(target, error);
+
+        send_error(sender,
+                   "USER_NOT_FOUND",
+                   "target user is not online");
+    }
+}
+
+void handle_chat(
+    const std::shared_ptr<ClientConnection>& sender,
+    const chat::Frame& frame) {
+    nlohmann::json payload;
+
+    try {
+        payload = nlohmann::json::parse(frame.payload);
+    } catch (const nlohmann::json::exception&) {
+        send_error(sender, "BAD_REQUEST", "invalid JSON payload");
+        return;
+    }
+
+    if (!payload.is_object() ||
+        !payload.contains("to") ||
+        !payload["to"].is_string() ||
+        !payload.contains("content") ||
+        !payload["content"].is_string()) {
+        send_error(sender,
+                   "BAD_REQUEST",
+                   "missing or invalid chat fields");
+        return;
+    }
+
+    const std::string to = trim(payload["to"].get<std::string>());
+    const std::string content = payload["content"].get<std::string>();
+
+    if (to.empty()) {
+        send_error(sender,
+                   "BAD_REQUEST",
+                   "chat target must not be empty");
+        return;
+    }
+
+    if (content.size() > chat::kMaxChatContentSize) {
+        send_error(sender,
+                   "MESSAGE_TOO_LARGE",
+                   "message content exceeds 1 MiB");
+        return;
+    }
+
+    const std::optional<std::string> from =
+        g_users.username_of(sender->fd());
+
+    if (!from.has_value()) {
+        send_error(sender,
+                   "NOT_LOGGED_IN",
+                   "please login first");
+        return;
+    }
+
+    if (to == "*") {
+        broadcast_chat(from.value(), content);
+    } else {
+        send_private_chat(sender, from.value(), to, content);
+    }
+}
+
+void handle_client(std::shared_ptr<ClientConnection> client) {
+    LoginGuard login_guard(g_users, client->fd());
 
     try {
         while (true) {
             chat::Frame frame;
 
-            if (!chat::recv_frame(client.get(), frame)) {
+            if (!chat::recv_frame(client->fd(), frame)) {
                 return;
             }
 
@@ -302,13 +400,13 @@ void handle_client(UniqueFd client) {
 
             if (!login_guard.is_logged_in()) {
                 if (frame.type != chat::MessageType::kLoginRequest) {
-                    send_error(client.get(),
+                    send_error(client,
                                "NOT_LOGGED_IN",
                                "please login first");
                     continue;
                 }
 
-                if (!handle_login(client.get(), frame, login_guard)) {
+                if (!handle_login(client, frame, login_guard)) {
                     return;
                 }
 
@@ -317,30 +415,28 @@ void handle_client(UniqueFd client) {
 
             switch (frame.type) {
                 case chat::MessageType::kListUsersRequest:
-                    handle_list_users(client.get());
+                    handle_list_users(client);
                     break;
 
                 case chat::MessageType::kSendChatRequest:
-                    send_error(client.get(),
-                               "BAD_REQUEST",
-                               "chat will be implemented in the next step");
+                    handle_chat(client, frame);
                     break;
 
                 case chat::MessageType::kLoginRequest:
-                    send_error(client.get(),
+                    send_error(client,
                                "BAD_REQUEST",
                                "already logged in");
                     break;
 
                 default:
-                    send_error(client.get(),
+                    send_error(client,
                                "UNKNOWN_TYPE",
                                "unknown message type");
                     break;
             }
         }
     } catch (const chat::ProtocolError& error) {
-        send_error(client.get(), "PROTOCOL_ERROR", error.what());
+        send_error(client, "PROTOCOL_ERROR", error.what());
         log_line(std::string("protocol error: ") + error.what());
     } catch (const chat::NetworkError& error) {
         log_line(std::string("network error: ") + error.what());
@@ -392,7 +488,8 @@ int main(int argc, char* argv[]) {
                 throw std::runtime_error(errno_message("accept"));
             }
 
-            UniqueFd client(raw_client_fd);
+            auto client =
+                std::make_shared<ClientConnection>(raw_client_fd);
 
             log_line("accepted connection from " +
                      client_address_text(client_address));
