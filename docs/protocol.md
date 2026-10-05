@@ -293,7 +293,6 @@ C/C++ 中可以使用：
 | `UNKNOWN_TYPE` | 消息类型不认识 |
 | `NOT_LOGGED_IN` | 客户端尚未登录就发送其他请求 |
 | `USER_NOT_FOUND` | 私聊目标不存在或不在线 |
-| `DUPLICATE_USERNAME` | 用户名已经被其他在线客户端使用 |
 | `MESSAGE_TOO_LARGE` | 聊天内容超过业务层大小上限 |
 
 ---
@@ -378,6 +377,9 @@ C/C++ 中可以使用：
 }
 ```
 
+如果客户端尚未登录，除 `LOGIN_REQ` 以外的消息会优先返回
+`NOT_LOGGED_IN`；只有已经完成登录的连接收到未知类型时才返回
+`UNKNOWN_TYPE`。
 ---
 
 ## 7. 在线列表流程
