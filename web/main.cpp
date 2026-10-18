@@ -1,17 +1,51 @@
+#include "web/http.hpp"
+
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <unistd.h>
 
 #include <cerrno>
 #include <iostream>
 #include <string>
 
+// 发送完整响应
+bool send_all_http(int fd, const std::string& data) {
+    std::size_t sent = 0;
+
+    while (sent < data.size()) {
+        ssize_t n = send(fd,
+                         data.data() + sent,
+                         data.size() - sent,
+                         MSG_NOSIGNAL);
+
+        if (n > 0) {
+            sent += static_cast<std::size_t>(n);
+        } else if (n < 0 && errno == EINTR) {
+            continue;
+        } else {
+            return false;
+        }
+    }
+
+    return true;
+}
+
 int main() {
     int server_fd = socket(AF_INET, SOCK_STREAM, 0);
 
     if (server_fd < 0) {
-        std::cerr << "socket 创建失败\n";
+        std::cerr << "socket failed\n";
+        return 1;
+    }
+
+    // 允许程序重启后尽快重新绑定端口
+    int opt = 1;
+    if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR,
+                   &opt, sizeof(opt)) < 0) {
+        std::cerr << "setsockopt failed\n";
+        close(server_fd);
         return 1;
     }
 
@@ -23,13 +57,13 @@ int main() {
     if (bind(server_fd,
              reinterpret_cast<sockaddr*>(&address),
              sizeof(address)) < 0) {
-        std::cerr << "bind 失败\n";
+        std::cerr << "bind failed\n";
         close(server_fd);
         return 1;
     }
 
     if (listen(server_fd, 10) < 0) {
-        std::cerr << "listen 失败\n";
+        std::cerr << "listen failed\n";
         close(server_fd);
         return 1;
     }
@@ -40,58 +74,67 @@ int main() {
         int client_fd = accept(server_fd, nullptr, nullptr);
 
         if (client_fd < 0) {
-            std::cerr << "accept 失败\n";
+            if (errno == EINTR) {
+                continue;
+            }
+            std::cerr << "accept failed\n";
             continue;
         }
 
-        // 1. 接收客户端发送的数据
-        char buffer[4096];
+        // 为接收和发送设置 5 秒操作超时
+        timeval timeout{};
+        timeout.tv_sec = 5;
 
-        ssize_t n = recv(client_fd, buffer, sizeof(buffer), 0);
-
-        if (n <= 0) {
+        if (setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO,
+                       &timeout, sizeof(timeout)) < 0 ||
+            setsockopt(client_fd, SOL_SOCKET, SO_SNDTIMEO,
+                       &timeout, sizeof(timeout)) < 0) {
             close(client_fd);
             continue;
         }
 
-        std::string request(buffer, static_cast<size_t>(n));
+        HttpRequest request;
+        HttpResponse response;
 
-        std::cout << "收到 HTTP 请求：\n";
-        std::cout << request << '\n';
+        HttpReadResult result = read_http_request(client_fd, request);
 
-        // 2. 构造 HTTP 响应正文
-        std::string body = "Hello from chat_lab!";
+        if (result == HttpReadResult::Ok) {
+            std::cout << "method: " << request.method << '\n';
+            std::cout << "path: " << request.path << '\n';
+            std::cout << "body size: " << request.body.size() << '\n';
 
-        // 3. 构造 HTTP 响应
-        std::string response =
-            "HTTP/1.1 200 OK\r\n"
-            "Content-Type: text/html; charset=utf-8\r\n"
-            "Content-Length: " + std::to_string(body.size()) + "\r\n"
-            "Connection: close\r\n"
-            "\r\n" + body;
-
-        // 4. 发送完整的 HTTP 响应
-        size_t sent = 0;
-
-        while (sent < response.size()) {
-            ssize_t nsend = send(
-                client_fd,
-                response.data() + sent,
-                response.size() - sent,
-                MSG_NOSIGNAL
-            );
-
-            if (nsend > 0) {
-                sent += static_cast<size_t>(nsend);
-            } else if (nsend < 0 && errno == EINTR) {
-                continue;
+            if (request.method == "GET" && request.path == "/") {
+                response.status = 200;
+                response.body = "Hello from chat_lab!";
             } else {
-                std::cerr << "send 失败或连接已关闭\n";
-                break;
+                response.status = 404;
+                response.body = "Not Found";
             }
+
+        } else if (result == HttpReadResult::TooLarge) {
+            response.status = 413;
+            response.body = "Request Too Large";
+
+        } else if (result == HttpReadResult::Timeout) {
+            response.status = 408;
+            response.body = "Request Timeout";
+
+        } else if (result == HttpReadResult::BadRequest) {
+            response.status = 400;
+            response.body = "Bad Request";
+
+        } else {
+            // 网络异常，不再尝试发送响应
+            close(client_fd);
+            continue;
         }
 
-        // 5. 关闭连接
+        std::string data = build_http_response(response);
+
+        if (!send_all_http(client_fd, data)) {
+            std::cerr << "Failed to send HTTP response\n";
+        }
+
         close(client_fd);
     }
 

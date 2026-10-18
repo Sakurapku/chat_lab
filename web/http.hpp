@@ -25,3 +25,18 @@ constexpr std::size_t MAX_BODY_SIZE = 2 * 1024 * 1024;
 
 bool parse_http_header(const std::string& raw,
                        HttpRequest& request);
+
+enum class HttpReadResult {
+    Ok,
+    BadRequest,
+    TooLarge,
+    Timeout,
+    IoError
+};
+
+// 从 TCP 连接中读取一条完整的 HTTP 请求
+HttpReadResult read_http_request(int client_fd,
+                                 HttpRequest& request);
+
+// 将 HTTP 响应转换为可以发送的字符串
+std::string build_http_response(const HttpResponse& response);
