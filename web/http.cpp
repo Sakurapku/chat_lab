@@ -291,6 +291,9 @@ std::string build_http_response(const HttpResponse& response) {
         case 431:
             reason = "Request Header Fields Too Large";
             break;
+        case 405:
+            reason = "Method Not Allowed";
+            break;
         default:
             reason = "Internal Server Error";
             break;

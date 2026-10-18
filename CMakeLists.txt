@@ -52,10 +52,15 @@ add_test(NAME net_test COMMAND net_test)
 add_executable(chat_web
     web/main.cpp
     web/http.cpp
+    web/router.cpp
 )
 
 target_include_directories(chat_web PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
+)
+
+target_link_libraries(chat_web PRIVATE
+    nlohmann_json::nlohmann_json
 )
 # HTTP 请求解析测试
 add_executable(http_test
@@ -68,3 +73,18 @@ target_include_directories(http_test PRIVATE
 )
 
 add_test(NAME http_test COMMAND http_test)
+
+add_executable(router_test
+    tests/router_test.cpp
+    web/router.cpp
+)
+
+target_include_directories(router_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+)
+
+target_link_libraries(router_test PRIVATE
+    nlohmann_json::nlohmann_json
+)
+
+add_test(NAME router_test COMMAND router_test)

@@ -1,4 +1,5 @@
 #include "web/http.hpp"
+#include "web/router.hpp"
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -103,13 +104,7 @@ int main() {
             std::cout << "path: " << request.path << '\n';
             std::cout << "body size: " << request.body.size() << '\n';
 
-            if (request.method == "GET" && request.path == "/") {
-                response.status = 200;
-                response.body = "Hello from chat_lab!";
-            } else {
-                response.status = 404;
-                response.body = "Not Found";
-            }
+            response = route_request(request);
 
         } else if (result == HttpReadResult::TooLarge) {
             response.status = 413;
