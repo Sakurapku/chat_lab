@@ -50,3 +50,14 @@ target_link_libraries(net_test PRIVATE chat_core)
 add_test(NAME net_test COMMAND net_test)
 # 第二阶段：HTTP 服务端
 add_executable(chat_web web/main.cpp)
+# HTTP 请求解析测试
+add_executable(http_test
+    tests/http_test.cpp
+    web/http.cpp
+)
+
+target_include_directories(http_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+)
+
+add_test(NAME http_test COMMAND http_test)

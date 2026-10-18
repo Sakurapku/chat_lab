@@ -22,3 +22,6 @@ struct HttpResponse {
 
 constexpr std::size_t MAX_HEADER_SIZE = 16 * 1024;
 constexpr std::size_t MAX_BODY_SIZE = 2 * 1024 * 1024;
+
+bool parse_http_header(const std::string& raw,
+                       HttpRequest& request);
