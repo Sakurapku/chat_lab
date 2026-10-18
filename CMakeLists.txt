@@ -48,3 +48,5 @@ add_test(NAME protocol_test COMMAND protocol_test)
 add_executable(net_test tests/net_test.cpp)
 target_link_libraries(net_test PRIVATE chat_core)
 add_test(NAME net_test COMMAND net_test)
+# 第二阶段：HTTP 服务端
+add_executable(chat_web web/main.cpp)
