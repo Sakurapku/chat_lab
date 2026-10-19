@@ -294,6 +294,15 @@ std::string build_http_response(const HttpResponse& response) {
         case 405:
             reason = "Method Not Allowed";
             break;
+        case 201:
+            reason = "Created";
+    	    break;
+ 	case 409:
+            reason = "Conflict";
+            break;
+        case 500:
+            reason = "Internal Server Error";
+            break;
         default:
             reason = "Internal Server Error";
             break;
