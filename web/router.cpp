@@ -4,12 +4,12 @@
 
 #include <cstddef>
 #include <string>
+#include <vector>
 
 using json = nlohmann::json;
 
 namespace {
 
-// 生成 JSON HTTP 响应
 HttpResponse make_json_response(
     int status,
     const json& data
@@ -23,7 +23,6 @@ HttpResponse make_json_response(
     return response;
 }
 
-// 生成错误响应
 HttpResponse make_error(
     int status,
     const std::string& message
@@ -33,7 +32,6 @@ HttpResponse make_error(
     });
 }
 
-// 检查请求是不是 JSON 格式
 bool is_json_request(const HttpRequest& request) {
     auto it = request.headers.find("content-type");
 
@@ -43,7 +41,6 @@ bool is_json_request(const HttpRequest& request) {
 
     std::string value = it->second;
 
-    // 允许 application/json; charset=utf-8
     std::size_t pos = value.find(';');
     value = value.substr(0, pos);
 
@@ -56,7 +53,6 @@ bool is_json_request(const HttpRequest& request) {
 
     value = value.substr(first, last - first + 1);
 
-    // HTTP 媒体类型不区分大小写
     for (char& c : value) {
         if (c >= 'A' && c <= 'Z') {
             c = static_cast<char>(c - 'A' + 'a');
@@ -66,17 +62,17 @@ bool is_json_request(const HttpRequest& request) {
     return value == "application/json";
 }
 
-// 解析 JSON 对象
 bool parse_json_object(
     const HttpRequest& request,
     json& data
 ) {
-    data = json::parse(request.body, nullptr, false);
+    data = json::parse(
+        request.body, nullptr, false
+    );
 
     return !data.is_discarded() && data.is_object();
 }
 
-// 提取 Bearer Token
 bool extract_token(
     const HttpRequest& request,
     std::string& token
@@ -89,13 +85,14 @@ bool extract_token(
 
     const std::string prefix = "Bearer ";
 
-    if (it->second.compare(0, prefix.size(), prefix) != 0) {
+    if (it->second.compare(
+            0, prefix.size(), prefix
+        ) != 0) {
         return false;
     }
 
     token = it->second.substr(prefix.size());
 
-    // 当前版本 Token 固定为 64 个小写十六进制字符
     if (token.size() != 64) {
         return false;
     }
@@ -116,7 +113,7 @@ HttpResponse route_request(
     const HttpRequest& request,
     AccountStore& accounts
 ) {
-    // 首页
+    // 1. 首页
     if (request.path == "/") {
         if (request.method != "GET") {
             return make_error(405, "Method Not Allowed");
@@ -129,7 +126,7 @@ HttpResponse route_request(
         return response;
     }
 
-    // 健康检查
+    // 2. 健康检查
     if (request.path == "/api/health") {
         if (request.method != "GET") {
             return make_error(405, "Method Not Allowed");
@@ -141,14 +138,16 @@ HttpResponse route_request(
         });
     }
 
-    // JSON 回显测试
+    // 3. JSON 回显
     if (request.path == "/api/echo") {
         if (request.method != "POST") {
             return make_error(405, "Method Not Allowed");
         }
 
         if (!is_json_request(request)) {
-            return make_error(400, "Content-Type must be application/json");
+            return make_error(
+                400, "Content-Type must be application/json"
+            );
         }
 
         json data;
@@ -159,10 +158,13 @@ HttpResponse route_request(
 
         if (!data.contains("message") ||
             !data["message"].is_string()) {
-            return make_error(400, "Missing or invalid message");
+            return make_error(
+                400, "Missing or invalid message"
+            );
         }
 
-        std::string message = data["message"].get<std::string>();
+        std::string message =
+            data["message"].get<std::string>();
 
         constexpr std::size_t MAX_MESSAGE_SIZE = 1024 * 1024;
 
@@ -175,14 +177,16 @@ HttpResponse route_request(
         });
     }
 
-    // 注册
+    // 4. 用户注册
     if (request.path == "/api/register") {
         if (request.method != "POST") {
             return make_error(405, "Method Not Allowed");
         }
 
         if (!is_json_request(request)) {
-            return make_error(400, "Content-Type must be application/json");
+            return make_error(
+                400, "Content-Type must be application/json"
+            );
         }
 
         json data;
@@ -195,11 +199,16 @@ HttpResponse route_request(
             !data["username"].is_string() ||
             !data.contains("password") ||
             !data["password"].is_string()) {
-            return make_error(400, "Invalid username or password");
+            return make_error(
+                400, "Invalid username or password"
+            );
         }
 
-        std::string username = data["username"].get<std::string>();
-        std::string password = data["password"].get<std::string>();
+        std::string username =
+            data["username"].get<std::string>();
+
+        std::string password =
+            data["password"].get<std::string>();
 
         RegisterResult result =
             accounts.register_user(username, password);
@@ -226,14 +235,16 @@ HttpResponse route_request(
         return make_error(500, "Internal server error");
     }
 
-    // 登录
+    // 5. 用户登录
     if (request.path == "/api/login") {
         if (request.method != "POST") {
             return make_error(405, "Method Not Allowed");
         }
 
         if (!is_json_request(request)) {
-            return make_error(400, "Content-Type must be application/json");
+            return make_error(
+                400, "Content-Type must be application/json"
+            );
         }
 
         json data;
@@ -246,11 +257,16 @@ HttpResponse route_request(
             !data["username"].is_string() ||
             !data.contains("password") ||
             !data["password"].is_string()) {
-            return make_error(400, "Invalid username or password");
+            return make_error(
+                400, "Invalid username or password"
+            );
         }
 
-        std::string username = data["username"].get<std::string>();
-        std::string password = data["password"].get<std::string>();
+        std::string username =
+            data["username"].get<std::string>();
+
+        std::string password =
+            data["password"].get<std::string>();
 
         std::string token;
 
@@ -266,16 +282,20 @@ HttpResponse route_request(
                 });
 
             case LoginResult::InvalidCredentials:
-                return make_error(401, "Invalid username or password");
+                return make_error(
+                    401, "Invalid username or password"
+                );
 
             case LoginResult::InternalError:
-                return make_error(500, "Internal server error");
+                return make_error(
+                    500, "Internal server error"
+                );
         }
 
         return make_error(500, "Internal server error");
     }
 
-    // 获取当前登录用户
+    // 6. 当前登录用户
     if (request.path == "/api/me") {
         if (request.method != "GET") {
             return make_error(405, "Method Not Allowed");
@@ -284,13 +304,17 @@ HttpResponse route_request(
         std::string token;
 
         if (!extract_token(request, token)) {
-            return make_error(401, "Missing or invalid token");
+            return make_error(
+                401, "Missing or invalid token"
+            );
         }
 
         std::string username;
 
         if (!accounts.authenticate(token, username)) {
-            return make_error(401, "Session expired or invalid");
+            return make_error(
+                401, "Session expired or invalid"
+            );
         }
 
         return make_json_response(200, {
@@ -298,7 +322,63 @@ HttpResponse route_request(
         });
     }
 
-    // 退出登录
+    // 7. 心跳接口
+    if (request.path == "/api/heartbeat") {
+        if (request.method != "POST") {
+            return make_error(405, "Method Not Allowed");
+        }
+
+        std::string token;
+
+        if (!extract_token(request, token)) {
+            return make_error(
+                401, "Missing or invalid token"
+            );
+        }
+
+        if (!accounts.heartbeat(token)) {
+            return make_error(
+                401, "Session expired or invalid"
+            );
+        }
+
+        return make_json_response(200, {
+            {"status", "ok"}
+        });
+    }
+
+    // 8. 在线用户列表
+    if (request.path == "/api/users") {
+        if (request.method != "GET") {
+            return make_error(405, "Method Not Allowed");
+        }
+
+        std::string token;
+
+        if (!extract_token(request, token)) {
+            return make_error(
+                401, "Missing or invalid token"
+            );
+        }
+
+        std::string username;
+
+        if (!accounts.authenticate(token, username)) {
+            return make_error(
+                401, "Session expired or invalid"
+            );
+        }
+
+        std::vector<std::string> users =
+            accounts.get_online_users();
+
+        return make_json_response(200, {
+            {"users", users},
+            {"count", users.size()}
+        });
+    }
+
+    // 9. 用户退出
     if (request.path == "/api/logout") {
         if (request.method != "POST") {
             return make_error(405, "Method Not Allowed");
@@ -307,11 +387,15 @@ HttpResponse route_request(
         std::string token;
 
         if (!extract_token(request, token)) {
-            return make_error(401, "Missing or invalid token");
+            return make_error(
+                401, "Missing or invalid token"
+            );
         }
 
         if (!accounts.logout_user(token)) {
-            return make_error(401, "Session expired or invalid");
+            return make_error(
+                401, "Session expired or invalid"
+            );
         }
 
         return make_json_response(200, {

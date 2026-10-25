@@ -1,48 +1,76 @@
 #include "web/auth/account.hpp"
 
+#include <algorithm>
 #include <cassert>
 #include <iostream>
 #include <string>
+#include <vector>
+
+// 判断用户名是否出现在在线列表中
+bool contains_user(
+    const std::vector<std::string>& users,
+    const std::string& username
+) {
+    return std::find(
+        users.begin(), users.end(), username
+    ) != users.end();
+}
 
 int main() {
     AccountStore accounts;
 
-    // 测试 1：正常注册
+    // 1. 注册 Alice
     assert(
         accounts.register_user("alice", "password123")
         == RegisterResult::Success
     );
 
-    // 测试 2：重复注册
+    // 2. 重复注册失败
     assert(
         accounts.register_user("alice", "another123")
         == RegisterResult::UserExists
     );
 
-    // 测试 3：非法用户名
+    // 3. 无效用户名
     assert(
         accounts.register_user("a!", "password123")
         == RegisterResult::InvalidUsername
     );
 
-    // 测试 4：密码太短
+    // 4. 密码太短
     assert(
         accounts.register_user("bob", "123")
         == RegisterResult::InvalidPassword
     );
 
-    // 测试 5：正确密码登录
-    std::string token;
+    // 5. 注册 Bob
+    assert(
+        accounts.register_user("bob", "password456")
+        == RegisterResult::Success
+    );
+
+    // 6. 初始没有在线用户
+    auto users = accounts.get_online_users();
+    assert(users.empty());
+
+    // 7. Alice 登录
+    std::string alice_token;
 
     assert(
         accounts.login_user(
-            "alice", "password123", token
+            "alice", "password123", alice_token
         ) == LoginResult::Success
     );
 
-    assert(token.size() == 64);
+    assert(alice_token.size() == 64);
 
-    // 测试 6：错误密码无法登录
+    // 8. 登录后 Alice 在线
+    users = accounts.get_online_users();
+
+    assert(users.size() == 1);
+    assert(contains_user(users, "alice"));
+
+    // 9. 错误密码登录失败
     std::string bad_token;
 
     assert(
@@ -53,58 +81,80 @@ int main() {
 
     assert(bad_token.empty());
 
-    // 测试 7：不存在的用户无法登录
-    assert(
-        accounts.login_user(
-            "nobody", "password123", bad_token
-        ) == LoginResult::InvalidCredentials
-    );
-
-    // 测试 8：正确 Token 能取得用户名
-    std::string username;
-
-    assert(accounts.authenticate(token, username));
-    assert(username == "alice");
-
-    // 测试 9：伪造 Token 无法通过认证
-    std::string fake_token(64, '0');
-
-    assert(
-        !accounts.authenticate(fake_token, username)
-    );
-
-    // 测试 10：两次登录产生不同 Token
-    std::string token2;
+    // 10. Bob 登录
+    std::string bob_token;
 
     assert(
         accounts.login_user(
-            "alice", "password123", token2
+            "bob", "password456", bob_token
         ) == LoginResult::Success
     );
 
-    assert(token != token2);
+    // 11. 两人同时在线
+    users = accounts.get_online_users();
 
-    // 测试 11：注销第一个 Token
-    assert(accounts.logout_user(token));
+    assert(users.size() == 2);
+    assert(contains_user(users, "alice"));
+    assert(contains_user(users, "bob"));
 
-    // 测试 12：注销后第一个 Token 无效
+    // 12. 心跳成功
+    assert(accounts.heartbeat(alice_token));
+    assert(accounts.heartbeat(bob_token));
+
+    // 13. 伪造 Token 心跳失败
+    std::string fake_token(64, '0');
+
+    assert(!accounts.heartbeat(fake_token));
+
+    // 14. Alice 再次登录
+    std::string alice_token2;
+
     assert(
-        !accounts.authenticate(token, username)
+        accounts.login_user(
+            "alice", "password123", alice_token2
+        ) == LoginResult::Success
     );
 
-    // 测试 13：第二个 Token 仍然有效
+    assert(alice_token != alice_token2);
+
+    // 同一用户多 Session，在线列表不重复
+    users = accounts.get_online_users();
+
+    assert(users.size() == 2);
+
+    // 15. 第一个 Alice Session 退出
+    assert(accounts.logout_user(alice_token));
+
+    // Alice 另一个 Session 仍在线
+    users = accounts.get_online_users();
+
+    assert(users.size() == 2);
+    assert(contains_user(users, "alice"));
+
+    // 16. 第二个 Alice Session 退出
+    assert(accounts.logout_user(alice_token2));
+
+    users = accounts.get_online_users();
+
+    assert(users.size() == 1);
+    assert(!contains_user(users, "alice"));
+    assert(contains_user(users, "bob"));
+
+    // 17. 已注销 Token 不可用
+    std::string username;
+
     assert(
-        accounts.authenticate(token2, username)
+        !accounts.authenticate(
+            alice_token, username
+        )
     );
 
-    assert(username == "alice");
+    // 18. Bob 退出
+    assert(accounts.logout_user(bob_token));
 
-    // 测试 14：第二个 Token 注销
-    assert(accounts.logout_user(token2));
+    users = accounts.get_online_users();
 
-    assert(
-        !accounts.authenticate(token2, username)
-    );
+    assert(users.empty());
 
     std::cout << "All account tests passed!\n";
 

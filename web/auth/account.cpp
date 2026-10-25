@@ -6,11 +6,13 @@
 
 #include <array>
 #include <chrono>
-#include <limits>
 #include <mutex>
+#include <set>
 #include <string>
+#include <utility>
+#include <vector>
 
-// 判断用户名是否合法
+// 检查用户名是否合法
 bool AccountStore::valid_username(
     const std::string& username
 ) {
@@ -33,7 +35,7 @@ bool AccountStore::valid_username(
     return true;
 }
 
-// 判断密码长度是否合法
+// 检查密码是否合法
 bool AccountStore::valid_password(
     const std::string& password
 ) {
@@ -41,7 +43,7 @@ bool AccountStore::valid_password(
            password.size() <= 128;
 }
 
-// PBKDF2-HMAC-SHA256 密码派生
+// 使用 PBKDF2-HMAC-SHA256 派生密码
 bool AccountStore::hash_password(
     const std::string& password,
     const std::array<unsigned char, SALT_SIZE>& salt,
@@ -61,8 +63,10 @@ bool AccountStore::hash_password(
     return ok == 1;
 }
 
-// 生成 32 字节随机 Token，转换为 64 位十六进制字符
-bool AccountStore::generate_token(std::string& token) {
+// 生成随机 Token
+bool AccountStore::generate_token(
+    std::string& token
+) {
     std::array<unsigned char, 32> random_bytes{};
 
     if (RAND_bytes(
@@ -86,7 +90,7 @@ bool AccountStore::generate_token(std::string& token) {
     return true;
 }
 
-// 注册账户
+// 注册用户
 RegisterResult AccountStore::register_user(
     const std::string& username,
     const std::string& password
@@ -124,7 +128,7 @@ RegisterResult AccountStore::register_user(
     return RegisterResult::Success;
 }
 
-// 登录并生成 Session Token
+// 登录用户
 LoginResult AccountStore::login_user(
     const std::string& username,
     const std::string& password,
@@ -142,7 +146,6 @@ LoginResult AccountStore::login_user(
 
     const Account& account = it->second;
 
-    // 使用原来的盐值计算输入密码的派生值
     std::array<unsigned char, HASH_SIZE> input_hash{};
 
     if (!hash_password(
@@ -153,14 +156,16 @@ LoginResult AccountStore::login_user(
         return LoginResult::InternalError;
     }
 
-    // 常量时间比较，避免普通逐字节比较带来的时序泄露
     int equal = CRYPTO_memcmp(
         input_hash.data(),
         account.password_hash.data(),
         HASH_SIZE
     );
 
-    OPENSSL_cleanse(input_hash.data(), input_hash.size());
+    OPENSSL_cleanse(
+        input_hash.data(),
+        input_hash.size()
+    );
 
     if (equal != 0) {
         return LoginResult::InvalidCredentials;
@@ -172,27 +177,44 @@ LoginResult AccountStore::login_user(
         return LoginResult::InternalError;
     }
 
-    auto expires = std::chrono::steady_clock::now()
-        + std::chrono::minutes(SESSION_MINUTES);
-
-    // 极小概率下如果 Token 重复，则重新生成
     while (sessions_.find(new_token) != sessions_.end()) {
         if (!generate_token(new_token)) {
             return LoginResult::InternalError;
         }
     }
 
-    sessions_.emplace(
-        new_token,
-        Session{username, expires}
-    );
+    TimePoint now = Clock::now();
+
+    Session session{
+        username,
+        now + std::chrono::minutes(SESSION_MINUTES),
+        now
+    };
+
+    sessions_.emplace(new_token, session);
 
     token = std::move(new_token);
 
     return LoginResult::Success;
 }
 
-// 根据 Token 确认用户身份
+// 清理超过 30 分钟的 Session
+// 调用者必须已经持有 mutex_
+void AccountStore::remove_expired_sessions(
+    TimePoint now
+) {
+    for (auto it = sessions_.begin();
+         it != sessions_.end();) {
+
+        if (now >= it->second.expires_at) {
+            it = sessions_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+// 检查 Token 并确认用户名
 bool AccountStore::authenticate(
     const std::string& token,
     std::string& username
@@ -201,30 +223,79 @@ bool AccountStore::authenticate(
 
     std::lock_guard<std::mutex> lock(mutex_);
 
+    TimePoint now = Clock::now();
+
+    remove_expired_sessions(now);
+
     auto it = sessions_.find(token);
 
     if (it == sessions_.end()) {
         return false;
     }
 
-    auto now = std::chrono::steady_clock::now();
-
-    // 会话过期，立即删除
-    if (now >= it->second.expires_at) {
-        sessions_.erase(it);
-        return false;
-    }
-
     username = it->second.username;
+
+    // 经过验证的请求属于用户活动
+    it->second.last_active = now;
 
     return true;
 }
 
-// 注销用户，使 Token 立即失效
+// 用户主动退出
 bool AccountStore::logout_user(
     const std::string& token
 ) {
     std::lock_guard<std::mutex> lock(mutex_);
 
+    remove_expired_sessions(Clock::now());
+
     return sessions_.erase(token) > 0;
+}
+
+// 处理心跳请求
+bool AccountStore::heartbeat(
+    const std::string& token
+) {
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    TimePoint now = Clock::now();
+
+    remove_expired_sessions(now);
+
+    auto it = sessions_.find(token);
+
+    if (it == sessions_.end()) {
+        return false;
+    }
+
+    it->second.last_active = now;
+
+    return true;
+}
+
+// 获取在线用户名列表
+std::vector<std::string> AccountStore::get_online_users() {
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    TimePoint now = Clock::now();
+
+    remove_expired_sessions(now);
+
+    // set 自动去重且按用户名排序
+    std::set<std::string> online;
+
+    for (const auto& item : sessions_) {
+        const Session& session = item.second;
+
+        auto inactive_time = now - session.last_active;
+
+        if (inactive_time <
+            std::chrono::seconds(ONLINE_TIMEOUT_SECONDS)) {
+            online.insert(session.username);
+        }
+    }
+
+    return std::vector<std::string>(
+        online.begin(), online.end()
+    );
 }
