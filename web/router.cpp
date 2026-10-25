@@ -3,6 +3,7 @@
 #include <nlohmann/json.hpp>
 
 #include <cstddef>
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -10,6 +11,7 @@ using json = nlohmann::json;
 
 namespace {
 
+// 生成 JSON 响应
 HttpResponse make_json_response(
     int status,
     const json& data
@@ -23,6 +25,7 @@ HttpResponse make_json_response(
     return response;
 }
 
+// 生成错误响应
 HttpResponse make_error(
     int status,
     const std::string& message
@@ -32,6 +35,7 @@ HttpResponse make_error(
     });
 }
 
+// 判断请求体是否为 JSON 格式
 bool is_json_request(const HttpRequest& request) {
     auto it = request.headers.find("content-type");
 
@@ -44,8 +48,11 @@ bool is_json_request(const HttpRequest& request) {
     std::size_t pos = value.find(';');
     value = value.substr(0, pos);
 
-    std::size_t first = value.find_first_not_of(" \t");
-    std::size_t last = value.find_last_not_of(" \t");
+    std::size_t first =
+        value.find_first_not_of(" \t");
+
+    std::size_t last =
+        value.find_last_not_of(" \t");
 
     if (first == std::string::npos) {
         return false;
@@ -62,6 +69,7 @@ bool is_json_request(const HttpRequest& request) {
     return value == "application/json";
 }
 
+// 解析 JSON 对象
 bool parse_json_object(
     const HttpRequest& request,
     json& data
@@ -73,6 +81,7 @@ bool parse_json_object(
     return !data.is_discarded() && data.is_object();
 }
 
+// 从 Authorization 中提取 Token
 bool extract_token(
     const HttpRequest& request,
     std::string& token
@@ -107,11 +116,27 @@ bool extract_token(
     return true;
 }
 
+// 验证 Token 并获取用户名
+bool get_authenticated_user(
+    const HttpRequest& request,
+    AccountStore& accounts,
+    std::string& username
+) {
+    std::string token;
+
+    if (!extract_token(request, token)) {
+        return false;
+    }
+
+    return accounts.authenticate(token, username);
+}
+
 } // namespace
 
 HttpResponse route_request(
     const HttpRequest& request,
-    AccountStore& accounts
+    AccountStore& accounts,
+    ChatStore& chats
 ) {
     // 1. 首页
     if (request.path == "/") {
@@ -146,7 +171,8 @@ HttpResponse route_request(
 
         if (!is_json_request(request)) {
             return make_error(
-                400, "Content-Type must be application/json"
+                400,
+                "Content-Type must be application/json"
             );
         }
 
@@ -166,9 +192,7 @@ HttpResponse route_request(
         std::string message =
             data["message"].get<std::string>();
 
-        constexpr std::size_t MAX_MESSAGE_SIZE = 1024 * 1024;
-
-        if (message.size() > MAX_MESSAGE_SIZE) {
+        if (message.size() > ChatStore::MAX_MESSAGE_SIZE) {
             return make_error(413, "Message Too Large");
         }
 
@@ -177,7 +201,7 @@ HttpResponse route_request(
         });
     }
 
-    // 4. 用户注册
+    // 4. 注册
     if (request.path == "/api/register") {
         if (request.method != "POST") {
             return make_error(405, "Method Not Allowed");
@@ -185,7 +209,8 @@ HttpResponse route_request(
 
         if (!is_json_request(request)) {
             return make_error(
-                400, "Content-Type must be application/json"
+                400,
+                "Content-Type must be application/json"
             );
         }
 
@@ -235,7 +260,7 @@ HttpResponse route_request(
         return make_error(500, "Internal server error");
     }
 
-    // 5. 用户登录
+    // 5. 登录
     if (request.path == "/api/login") {
         if (request.method != "POST") {
             return make_error(405, "Method Not Allowed");
@@ -243,7 +268,8 @@ HttpResponse route_request(
 
         if (!is_json_request(request)) {
             return make_error(
-                400, "Content-Type must be application/json"
+                400,
+                "Content-Type must be application/json"
             );
         }
 
@@ -287,33 +313,25 @@ HttpResponse route_request(
                 );
 
             case LoginResult::InternalError:
-                return make_error(
-                    500, "Internal server error"
-                );
+                return make_error(500, "Internal server error");
         }
 
         return make_error(500, "Internal server error");
     }
 
-    // 6. 当前登录用户
+    // 6. 当前用户
     if (request.path == "/api/me") {
         if (request.method != "GET") {
             return make_error(405, "Method Not Allowed");
         }
 
-        std::string token;
-
-        if (!extract_token(request, token)) {
-            return make_error(
-                401, "Missing or invalid token"
-            );
-        }
-
         std::string username;
 
-        if (!accounts.authenticate(token, username)) {
+        if (!get_authenticated_user(
+                request, accounts, username
+            )) {
             return make_error(
-                401, "Session expired or invalid"
+                401, "Missing or invalid session"
             );
         }
 
@@ -322,23 +340,19 @@ HttpResponse route_request(
         });
     }
 
-    // 7. 心跳接口
+    // 7. 心跳
     if (request.path == "/api/heartbeat") {
         if (request.method != "POST") {
             return make_error(405, "Method Not Allowed");
         }
 
-        std::string token;
+        std::string username;
 
-        if (!extract_token(request, token)) {
+        if (!get_authenticated_user(
+                request, accounts, username
+            )) {
             return make_error(
-                401, "Missing or invalid token"
-            );
-        }
-
-        if (!accounts.heartbeat(token)) {
-            return make_error(
-                401, "Session expired or invalid"
+                401, "Missing or invalid session"
             );
         }
 
@@ -347,30 +361,23 @@ HttpResponse route_request(
         });
     }
 
-    // 8. 在线用户列表
+    // 8. 在线用户
     if (request.path == "/api/users") {
         if (request.method != "GET") {
             return make_error(405, "Method Not Allowed");
         }
 
-        std::string token;
-
-        if (!extract_token(request, token)) {
-            return make_error(
-                401, "Missing or invalid token"
-            );
-        }
-
         std::string username;
 
-        if (!accounts.authenticate(token, username)) {
+        if (!get_authenticated_user(
+                request, accounts, username
+            )) {
             return make_error(
-                401, "Session expired or invalid"
+                401, "Missing or invalid session"
             );
         }
 
-        std::vector<std::string> users =
-            accounts.get_online_users();
+        auto users = accounts.get_online_users();
 
         return make_json_response(200, {
             {"users", users},
@@ -378,7 +385,123 @@ HttpResponse route_request(
         });
     }
 
-    // 9. 用户退出
+    // 9. 发送和接收消息
+    if (request.path == "/api/messages") {
+        std::string username;
+
+        // 无论发送还是接收，都必须先验证身份
+        if (!get_authenticated_user(
+                request, accounts, username
+            )) {
+            return make_error(
+                401, "Missing or invalid session"
+            );
+        }
+
+        // 9.1 接收自己的消息
+        if (request.method == "GET") {
+            std::vector<ChatMessage> messages =
+                chats.take_messages(username);
+
+            json result = json::array();
+
+            for (const auto& message : messages) {
+                result.push_back({
+                    {"id", message.id},
+                    {"from", message.from},
+                    {"to", message.to},
+                    {"content", message.content},
+                    {"type", message.type}
+                });
+            }
+
+            return make_json_response(200, {
+                {"messages", result},
+                {"count", result.size()}
+            });
+        }
+
+        // 只允许 POST 发送
+        if (request.method != "POST") {
+            return make_error(405, "Method Not Allowed");
+        }
+
+        if (!is_json_request(request)) {
+            return make_error(
+                400,
+                "Content-Type must be application/json"
+            );
+        }
+
+        json data;
+
+        if (!parse_json_object(request, data)) {
+            return make_error(400, "Invalid JSON");
+        }
+
+        if (!data.contains("content") ||
+            !data["content"].is_string()) {
+            return make_error(
+                400, "Missing or invalid content"
+            );
+        }
+
+        // 默认群聊
+        std::string to;
+
+        if (data.contains("to") && !data["to"].is_null()) {
+            if (!data["to"].is_string()) {
+                return make_error(400, "Invalid recipient");
+            }
+
+            to = data["to"].get<std::string>();
+        }
+
+        std::string content =
+            data["content"].get<std::string>();
+
+        auto online_users = accounts.get_online_users();
+
+        std::uint64_t message_id = 0;
+
+        SendResult result = chats.send_message(
+            username,
+            to,
+            content,
+            online_users,
+            message_id
+        );
+
+        switch (result) {
+            case SendResult::Success:
+                return make_json_response(200, {
+                    {"message", "Sent successfully"},
+                    {"id", message_id},
+                    {"from", username},
+                    {"type", to.empty() ? "group" : "private"}
+                });
+
+            case SendResult::EmptyMessage:
+                return make_error(400, "Empty message");
+
+            case SendResult::TooLarge:
+                return make_error(413, "Message Too Large");
+
+            case SendResult::UserOffline:
+                return make_error(
+                    404, "Recipient is not online"
+                );
+
+            case SendResult::QueueFull:
+                return make_error(
+                    503, "Message queue is full"
+                );
+        }
+
+        return make_error(500, "Internal server error");
+    }
+
+    // 10. 退出登录
     if (request.path == "/api/logout") {
         if (request.method != "POST") {
             return make_error(405, "Method Not Allowed");

@@ -12,10 +12,13 @@
 #include <string>
 #include <utility>
 
-// 请求头名称统一转为小写
+namespace {
+
 std::string to_lower(std::string str) {
     std::transform(
-        str.begin(), str.end(), str.begin(),
+        str.begin(),
+        str.end(),
+        str.begin(),
         [](unsigned char c) {
             return static_cast<char>(std::tolower(c));
         }
@@ -24,7 +27,6 @@ std::string to_lower(std::string str) {
     return str;
 }
 
-// 去除首尾空格和 Tab
 std::string trim(const std::string& str) {
     std::size_t first = str.find_first_not_of(" \t");
 
@@ -37,7 +39,38 @@ std::string trim(const std::string& str) {
     return str.substr(first, last - first + 1);
 }
 
-// 解析 HTTP 请求头
+bool parse_content_length(
+    const std::string& str,
+    std::size_t& length
+) {
+    if (str.empty()) {
+        return false;
+    }
+
+    std::size_t result = 0;
+
+    for (char c : str) {
+        if (c < '0' || c > '9') {
+            return false;
+        }
+
+        std::size_t digit =
+            static_cast<std::size_t>(c - '0');
+
+        if (result >
+            (std::numeric_limits<std::size_t>::max() - digit) / 10) {
+            return false;
+        }
+
+        result = result * 10 + digit;
+    }
+
+    length = result;
+    return true;
+}
+
+} // namespace
+
 bool parse_http_header(
     const std::string& raw,
     HttpRequest& request
@@ -65,7 +98,6 @@ bool parse_http_header(
     line.pop_back();
 
     HttpRequest result;
-
     std::istringstream request_line(line);
     std::string extra;
 
@@ -114,7 +146,6 @@ bool parse_http_header(
 
         std::string key = line.substr(0, pos);
 
-        // 请求头名称中不允许空格及控制字符
         for (unsigned char c : key) {
             if (c <= 32 || c >= 127) {
                 return false;
@@ -125,7 +156,6 @@ bool parse_http_header(
 
         std::string value = trim(line.substr(pos + 1));
 
-        // 简化实现：拒绝重复请求头，避免歧义
         if (result.headers.count(key) != 0) {
             return false;
         }
@@ -138,43 +168,9 @@ bool parse_http_header(
     }
 
     request = std::move(result);
-
     return true;
 }
 
-// 安全解析 Content-Length
-bool parse_content_length(
-    const std::string& str,
-    std::size_t& length
-) {
-    if (str.empty()) {
-        return false;
-    }
-
-    std::size_t result = 0;
-
-    for (char c : str) {
-        if (c < '0' || c > '9') {
-            return false;
-        }
-
-        std::size_t digit =
-            static_cast<std::size_t>(c - '0');
-
-        if (result >
-            (std::numeric_limits<std::size_t>::max() - digit) / 10) {
-            return false;
-        }
-
-        result = result * 10 + digit;
-    }
-
-    length = result;
-
-    return true;
-}
-
-// 从 TCP 连接读取完整 HTTP 请求
 HttpReadResult read_http_request(
     int client_fd,
     HttpRequest& request
@@ -201,10 +197,15 @@ HttpReadResult read_http_request(
         std::size_t capacity =
             std::min(remaining, sizeof(buffer));
 
-        ssize_t n = recv(client_fd, buffer, capacity, 0);
+        ssize_t n = recv(
+            client_fd, buffer, capacity, 0
+        );
 
         if (n > 0) {
-            data.append(buffer, static_cast<std::size_t>(n));
+            data.append(
+                buffer,
+                static_cast<std::size_t>(n)
+            );
         } else if (n == 0) {
             return HttpReadResult::BadRequest;
         } else if (errno == EINTR) {
@@ -230,7 +231,6 @@ HttpReadResult read_http_request(
         return HttpReadResult::BadRequest;
     }
 
-    // 当前版本不支持 chunked 请求体
     if (request.headers.count("transfer-encoding") != 0) {
         return HttpReadResult::BadRequest;
     }
@@ -273,10 +273,15 @@ HttpReadResult read_http_request(
         std::size_t capacity =
             std::min(remaining, sizeof(buffer));
 
-        ssize_t n = recv(client_fd, buffer, capacity, 0);
+        ssize_t n = recv(
+            client_fd, buffer, capacity, 0
+        );
 
         if (n > 0) {
-            body.append(buffer, static_cast<std::size_t>(n));
+            body.append(
+                buffer,
+                static_cast<std::size_t>(n)
+            );
         } else if (n == 0) {
             return HttpReadResult::BadRequest;
         } else if (errno == EINTR) {
@@ -294,7 +299,6 @@ HttpReadResult read_http_request(
     return HttpReadResult::Ok;
 }
 
-// 构造 HTTP 响应字符串
 std::string build_http_response(
     const HttpResponse& response
 ) {
@@ -345,12 +349,16 @@ std::string build_http_response(
             reason = "Internal Server Error";
             break;
 
+        case 503:
+            reason = "Service Unavailable";
+            break;
+
         default:
             reason = "Internal Server Error";
             break;
     }
 
-    std::string result =
+    return
         "HTTP/1.1 " + std::to_string(response.status)
         + " " + reason + "\r\n"
         + "Content-Type: " + response.content_type + "\r\n"
@@ -361,6 +369,4 @@ std::string build_http_response(
         + "X-Content-Type-Options: nosniff\r\n"
         + "\r\n"
         + response.body;
-
-    return result;
 }
